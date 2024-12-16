@@ -59,3 +59,4 @@ Enjoy it:)
 ## Maintainer
 
 Wooseong Yang (yellowish@snu.ac.kr)
+Minwoo Jung (moonshot@snu.ac.kr)
