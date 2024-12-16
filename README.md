@@ -9,7 +9,7 @@ Novatel GPS Driver Installation:
 $ sudo apt-get install ros-VERSION-novatel-gps-driver
 ```
 
-Livow ROS Driver2 Installation:
+Livox ROS Driver2 Installation:
 
 Follow the official reopository of [Livox-ros-driver2](https://github.com/Livox-SDK/livox_ros_driver2)
 
