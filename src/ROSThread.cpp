@@ -7,20 +7,23 @@ using namespace std;
 ROSThread::ROSThread(QObject *parent, QMutex *th_mutex) :
     QThread(parent), mutex_(th_mutex)
 {
+  // std::cout<<"ros thread create start"<<std::endl;
   processed_stamp_ = 0;
   play_rate_ = 1.0;
   loop_flag_ = false;
   save_flag_ = false;
   process_flag_ = false;
+  stop_skip_flag_ = true;
+
+
   minimum = 0;
   search_bound_ = 10;
   // search_bound_ = 1000000;
   reset_process_stamp_flag_ = false;
   auto_start_flag_ = true;
   stamp_show_count_ = 0;
-  imu_data_version_ = 0;
   prev_clock_stamp_ = 0;
-  bag_idx_= 0;
+  // std::cout<<"ros thread create end"<<std::endl;
 }
 
 ROSThread::~ROSThread()
@@ -52,31 +55,46 @@ ROSThread::~ROSThread()
   if(aeva_thread_.thread_.joinable()) aeva_thread_.thread_.join();
 }
 
-void ROSThread::ros_initialize(ros::NodeHandle &n)
+void ROSThread::ros_initialize(rclcpp::Node::SharedPtr node)
 {
-  nh_ = n;
+    node_ = node;  // Use a shared pointer for the node
 
-  pre_timer_stamp_ = ros::Time::now().toNSec();
-  timer_ = nh_.createTimer(ros::Duration(0.0001), boost::bind(&ROSThread::TimerCallback, this, _1));
+    rclcpp::Time pre_time = rclcpp::Clock().now();
+    pre_timer_stamp_ = pre_time.nanoseconds();
 
-  start_sub_  = nh_.subscribe<std_msgs::Bool>("/file_player_start", 1, boost::bind(&ROSThread::FilePlayerStart, this, _1));
-  stop_sub_    = nh_.subscribe<std_msgs::Bool>("/file_player_stop", 1, boost::bind(&ROSThread::FilePlayerStop, this, _1));
+    timer_ = node_->create_wall_timer(std::chrono::nanoseconds(100), std::bind(&ROSThread::TimerCallback, this));  // 100ns timer
 
-  inspva_pub_ = nh_.advertise<novatel_gps_msgs::Inspva>("/inspva", 1000);
-  imu_pub_ = nh_.advertise<sensor_msgs::Imu>("/imu/data_raw", 1000);
-  magnet_pub_ = nh_.advertise<sensor_msgs::MagneticField>("/imu/mag", 1000);
-  ouster_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/ouster/points", 10000);
-  velodyne_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/velodyne/points", 10000);
-  avia_pub_ = nh_.advertise<livox_ros_driver::CustomMsg>("/avia/points", 10000);
-  aeva_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/aeva/points", 10000);
-  clock_pub_ = nh_.advertise<rosgraph_msgs::Clock>("/clock", 1);
+    // Subscribers
+    start_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/file_player_start", 1, std::bind(&ROSThread::FilePlayerStart, this, std::placeholders::_1));
+
+    stop_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/file_player_stop", 1, std::bind(&ROSThread::FilePlayerStop, this, std::placeholders::_1));
+
+    // Publishers
+    inspva_pub_ = node_->create_publisher<novatel_gps_msgs::msg::Inspva>("/inspva", 100000);
+    imu_pub_ = node_->create_publisher<sensor_msgs::msg::Imu>("/imu/data_raw", 1000000);
+
+    aeva_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/aeva/points", 1000000);
+    avia_pub_ = node_->create_publisher<livox_ros_driver2::msg::CustomMsg>("/avia/points", 1000000);
+    ouster_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/ouster/points", 1000000);
+    velodyne_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/velodyne/points", 1000000);
+
+    // Clock Publisher
+    clock_pub_ = node_->create_publisher<rosgraph_msgs::msg::Clock>("/clock", 10);
 }
+
 
 void ROSThread::run()
 {
-  ros::AsyncSpinner spinner(0);
-  spinner.start();
-  ros::waitForShutdown();
+    // Create an executor (multi-threaded executor in this case)
+    rclcpp::executors::MultiThreadedExecutor executor;
+
+    // Add this node to the executor
+    executor.add_node(node_);
+
+    // Spin the executor to handle callbacks
+    executor.spin();
 }
 
 void ROSThread::Ready()
@@ -103,32 +121,32 @@ void ROSThread::Ready()
   aeva_thread_.cv_.notify_all();
   if(aeva_thread_.thread_.joinable()) aeva_thread_.thread_.join();
 
+
   //check path is right or not
   ifstream f((data_folder_path_+"/stamp.csv").c_str());
   if(!f.good()){
-     cout << "Please check file path. Input path is wrong" << endl;
+     cout << "stamp.csv does not exist. Please check file path." << endl;
      return;
   }
   f.close();
 
-  //Read CSV file and make map
+  // Read CSV file and make map
   FILE *fp;
   int64_t stamp;
-  //data stamp data load
 
+  std::cout << "read data stamp" << std::endl;
   fp = fopen((data_folder_path_+"/stamp.csv").c_str(),"r");
   char data_name[50];
   data_stamp_.clear();
   while(fscanf(fp,"%ld,%s\n",&stamp,data_name) == 2){
-//    data_stamp_[stamp] = data_name;
+    // std::cout<<stamp<<","<<data_name<<std::endl;
     data_stamp_.insert( multimap<int64_t, string>::value_type(stamp, data_name));
   }
-  cout << "Stamp data are loaded" << endl;
-  fclose(fp);
-
   initial_data_stamp_ = data_stamp_.begin()->first - 1;
   last_data_stamp_ = prev(data_stamp_.end(),1)->first - 1;
 
+  cout << "Data stamps are loaded" << endl;
+  fclose(fp);
 
   //Read inspva data
   fp = fopen((data_folder_path_+"/Inertial_data/inspva.csv").c_str(),"r");
@@ -136,7 +154,7 @@ void ROSThread::Ready()
   double height, north_velocity, east_velocity, up_velocity, roll, pitch, azimuth;
   char status_buffer[50];  // This buffer is to read "status: #" format
   int status;
-  novatel_gps_msgs::Inspva inspva_data;
+  novatel_gps_msgs::msg::Inspva inspva_data;
   inspva_data_.clear();
   while (fscanf(fp, "%ld,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%[^,\n]", 
                 &stamp, &latitude, &longitude, &height, 
@@ -146,7 +164,7 @@ void ROSThread::Ready()
       // Extracting the actual status value from "status: #"
       sscanf(status_buffer, "status: %d", &status);
 
-      inspva_data.header.stamp.fromNSec(stamp);
+      inspva_data.header.stamp = rclcpp::Time(stamp);
       inspva_data.header.frame_id = "inspva";
       inspva_data.latitude = latitude;
       inspva_data.longitude = longitude;
@@ -162,14 +180,13 @@ void ROSThread::Ready()
   }
 
   fclose(fp);
-  cout << "Inspva data are loaded" << endl;
-
+  std::cout << "Inspva data are loaded" << std::endl; 
 
   //Read IMU data
   fp = fopen((data_folder_path_+"/Inertial_data/xsens_imu.csv").c_str(),"r");
   double q_x,q_y,q_z,q_w,x,y,z,g_x,g_y,g_z,a_x,a_y,a_z,m_x,m_y,m_z;
-  sensor_msgs::Imu imu_data;
-  sensor_msgs::MagneticField mag_data;
+  sensor_msgs::msg::Imu imu_data;
+  sensor_msgs::msg::MagneticField mag_data;
   imu_data_.clear();
   mag_data_.clear();
 
@@ -177,7 +194,7 @@ void ROSThread::Ready()
     int length = fscanf(fp,"%ld,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf\n",&stamp,&q_x,&q_y,&q_z,&q_w,&x,&y,&z,&g_x,&g_y,&g_z,&a_x,&a_y,&a_z,&m_x,&m_y,&m_z);
     if(length != 8 && length != 17) break;
     if(length == 8){
-      imu_data.header.stamp.fromNSec(stamp);
+      imu_data.header.stamp = rclcpp::Time(stamp);
       imu_data.header.frame_id = "imu";
       imu_data.orientation.x = q_x;
       imu_data.orientation.y = q_y;
@@ -188,7 +205,7 @@ void ROSThread::Ready()
       imu_data_version_ = 1;
 
     }else if(length == 17){
-      imu_data.header.stamp.fromNSec(stamp);
+      imu_data.header.stamp = rclcpp::Time(stamp);
       imu_data.header.frame_id = "imu";
       imu_data.orientation.x = q_x;
       imu_data.orientation.y = q_y;
@@ -213,7 +230,7 @@ void ROSThread::Ready()
 
 
       imu_data_[stamp] = imu_data;
-      mag_data.header.stamp.fromNSec(stamp);
+      mag_data.header.stamp = rclcpp::Time(stamp);
       mag_data.header.frame_id = "imu";
       mag_data.magnetic_field.x = m_x;
       mag_data.magnetic_field.y = m_y;
@@ -226,6 +243,7 @@ void ROSThread::Ready()
   cout << "IMU data are loaded" << endl;
   fclose(fp);
 
+
   ouster_file_list_.clear();
   velodyne_file_list_.clear();
   avia_file_list_.clear();
@@ -235,7 +253,6 @@ void ROSThread::Ready()
   GetDirList(data_folder_path_ + "/LiDAR/Velodyne",velodyne_file_list_);
   GetDirList(data_folder_path_ + "/LiDAR/Avia",avia_file_list_);
   GetDirList(data_folder_path_ + "/LiDAR/Aeva",aeva_file_list_);
-
 
   data_stamp_thread_.active_ = true;
   inspva_thread_.active_ = true;
@@ -286,6 +303,21 @@ void ROSThread::DataStampThread()
       continue;
     }
 
+
+    //check whether stop region or not
+    if(stamp == stop_region_iter->first){
+      if(stop_skip_flag_ == true){
+        cout << "Skip stop section!!" << endl;
+        iter = data_stamp_.find(stop_region_iter->second);  //find stop region end
+        iter = prev(iter,1);
+        processed_stamp_ = stop_region_iter->second - initial_data_stamp_;
+      }
+      stop_region_iter++;
+      if(stop_skip_flag_ == true){
+        continue;
+      }
+    }
+
     if(data_stamp_thread_.active_ == false) return;
     if(iter->second.compare("inspva") == 0){
       inspva_thread_.push(stamp);
@@ -306,6 +338,7 @@ void ROSThread::DataStampThread()
         aeva_thread_.push(stamp);
         aeva_thread_.cv_.notify_all();
     }
+
     stamp_show_count_++;
     if(stamp_show_count_ > 100){
       stamp_show_count_ = 0;
@@ -313,9 +346,9 @@ void ROSThread::DataStampThread()
     }
 
     if(prev_clock_stamp_ == 0 || (stamp - prev_clock_stamp_) > 10000000){
-        rosgraph_msgs::Clock clock;
-        clock.clock.fromNSec(stamp);
-        clock_pub_.publish(clock);
+        rosgraph_msgs::msg::Clock clock;
+        clock.clock = rclcpp::Time(stamp);
+        clock_pub_->publish(clock);
         prev_clock_stamp_ = stamp;
     }
 
@@ -334,7 +367,9 @@ void ROSThread::DataStampThread()
         }
     }
     if(save_flag_ == true && process_flag_ == false){
-      bag_.open(data_folder_path_ + "/" + to_string(bag_idx_) + ".bag", rosbag::bagmode::Write);
+
+      storage_options.uri = rcpputils::fs::path(data_folder_path_ + "/" + to_string(bag_idx_)).string();
+      bag_.open(storage_options);
       process_flag_ = true;
     }
     else if(save_flag_ == false && process_flag_ == true){
@@ -344,7 +379,22 @@ void ROSThread::DataStampThread()
     }
   }
   cout << "Data publish complete" << endl;
+}
 
+// void ROSThread::TimerCallback(const rclcpp::TimerEvent& event)
+void ROSThread::TimerCallback()
+{
+    rclcpp::Time current_time = rclcpp::Clock().now();
+    int64_t current_stamp = current_time.nanoseconds();
+    if(play_flag_ == true && pause_flag_ == false){
+      processed_stamp_ += static_cast<int64_t>(static_cast<double>(current_stamp - pre_timer_stamp_) * play_rate_);
+    }
+    pre_timer_stamp_ = current_stamp;
+
+    if(play_flag_ == false){
+      processed_stamp_ = 0; //reset
+      prev_clock_stamp_ = 0;
+    }
 }
 
 void ROSThread::InspvaThread()
@@ -360,9 +410,9 @@ void ROSThread::InspvaThread()
       if(inspva_data_.find(data) != inspva_data_.end()){
         if(save_flag_ == true && process_flag_ == true){
           std::lock_guard<std::mutex> lock(bag_mutex_);
-          bag_.write("/inspva", inspva_data_[data].header.stamp, inspva_data_[data]);
+          bag_.write(inspva_data_[data], "/inspva", rclcpp::Time(data));
         }
-        inspva_pub_.publish(inspva_data_[data]);
+        inspva_pub_->publish(inspva_data_[data]);
       }
 
     }
@@ -383,31 +433,107 @@ void ROSThread::ImuThread()
       if(imu_data_.find(data) != imu_data_.end()){
         if(save_flag_ == true && process_flag_ == true){
           std::lock_guard<std::mutex> lock(bag_mutex_);
-          bag_.write("/imu/data_raw", imu_data_[data].header.stamp, imu_data_[data]);
+          bag_.write(imu_data_[data], "/imu/data_raw", rclcpp::Time(data));
         }
-        imu_pub_.publish(imu_data_[data]);
+        imu_pub_->publish(imu_data_[data]);
       }
-
     }
     if(imu_thread_.active_ == false) return;
   }
 }
 
-void ROSThread::TimerCallback(const ros::TimerEvent&)
+// aeva
+void ROSThread::AevaThread()
 {
-    int64_t current_stamp = ros::Time::now().toNSec();
-    if(play_flag_ == true && pause_flag_ == false){
-      processed_stamp_ += static_cast<int64_t>(static_cast<double>(current_stamp - pre_timer_stamp_) * play_rate_);
-    }
-    pre_timer_stamp_ = current_stamp;
+  int current_file_index = 0;
+  int previous_file_index = 0;
+  while(1){
+    std::unique_lock<std::mutex> ul(aeva_thread_.mutex_);
+    aeva_thread_.cv_.wait(ul);
+    if(aeva_thread_.active_ == false) return;
+    ul.unlock();
 
-    if(play_flag_ == false){
-      processed_stamp_ = 0; //reset
-      prev_clock_stamp_ = 0;
+    std::cout.precision(20);
+    while(!aeva_thread_.data_queue_.empty()){
+      auto data = aeva_thread_.pop();
+      //publish data
+      if(to_string(data) + ".bin" == aeva_next_.first){
+        aeva_next_.second.header.stamp = rclcpp::Time(data);
+        aeva_next_.second.header.frame_id = "aeva";
+        if(save_flag_ == true && process_flag_ == true){
+          std::lock_guard<std::mutex> lock(bag_mutex_);
+          bag_.write(aeva_next_.second, "/aeva/points", rclcpp::Time(data));
+        }
+        aeva_pub_->publish(aeva_next_.second);
+
+      }else{
+        //load current data
+        pcl::PointCloud<pc_type_a> cloud;
+        cloud.clear();
+        sensor_msgs::msg::PointCloud2 publish_cloud;
+        string current_file_name = data_folder_path_ + "/LiDAR/Aeva" +"/"+ to_string(data) + ".bin";
+        if(find(next(aeva_file_list_.begin(),max(0,previous_file_index-search_bound_)),aeva_file_list_.end(),to_string(data)+".bin") != aeva_file_list_.end()){
+            ifstream file;
+            file.open(current_file_name, ios::in|ios::binary);
+            while(!file.eof()){
+                pc_type_a point;
+                file.read(reinterpret_cast<char *>(&point.x), sizeof(float));
+                file.read(reinterpret_cast<char *>(&point.y), sizeof(float));
+                file.read(reinterpret_cast<char *>(&point.z), sizeof(float));
+                file.read(reinterpret_cast<char *>(&point.reflectivity), sizeof(float));
+                file.read(reinterpret_cast<char *>(&point.velocity), sizeof(float));
+                file.read(reinterpret_cast<char *>(&point.time_offset_ns), sizeof(int32_t));
+                file.read(reinterpret_cast<char *>(&point.line_index), sizeof(uint8_t));
+                if(data > 1691936557946849179)
+                    file.read(reinterpret_cast<char *>(&point.intensity), sizeof(float));
+                cloud.points.push_back (point);
+            }
+            file.close();
+
+            pcl::toROSMsg(cloud, publish_cloud);
+            publish_cloud.header.stamp = rclcpp::Time(data); 
+            publish_cloud.header.frame_id = "aeva";          
+            aeva_pub_->publish(publish_cloud);
+
+        }
+        previous_file_index = 0;
+      }
+
+      //load next data
+      pcl::PointCloud<pc_type_a> cloud;
+      cloud.clear();
+      sensor_msgs::msg::PointCloud2 publish_cloud;
+      current_file_index = find(next(aeva_file_list_.begin(),max(0,previous_file_index-search_bound_)),aeva_file_list_.end(),to_string(data)+".bin") - aeva_file_list_.begin();
+      if(find(next(aeva_file_list_.begin(),max(0,previous_file_index-search_bound_)),aeva_file_list_.end(),aeva_file_list_[current_file_index+1]) != aeva_file_list_.end()){
+          string next_file_name = data_folder_path_ + "/LiDAR/Aeva" +"/"+ aeva_file_list_[current_file_index+1];
+
+          ifstream file;
+          file.open(next_file_name, ios::in|ios::binary);
+          int k = 0;
+          while(!file.eof()){
+              pc_type_a point;
+              file.read(reinterpret_cast<char *>(&point.x), sizeof(float));
+              file.read(reinterpret_cast<char *>(&point.y), sizeof(float));
+              file.read(reinterpret_cast<char *>(&point.z), sizeof(float));
+              file.read(reinterpret_cast<char *>(&point.reflectivity), sizeof(float));
+              file.read(reinterpret_cast<char *>(&point.velocity), sizeof(float));
+              file.read(reinterpret_cast<char *>(&point.time_offset_ns), sizeof(int32_t));
+              file.read(reinterpret_cast<char *>(&point.line_index), sizeof(uint8_t));
+              if(data > 1691936557946849179)
+                  file.read(reinterpret_cast<char *>(&point.intensity), sizeof(float));
+              cloud.points.push_back (point);
+          }
+          file.close();
+          pcl::toROSMsg(cloud, publish_cloud);
+          aeva_next_ = make_pair(aeva_file_list_[current_file_index+1], publish_cloud);
+      }
+
+      previous_file_index = current_file_index;
     }
+    if(aeva_thread_.active_ == false) return;
+  }
 }
 
-//ouster
 void ROSThread::OusterThread()
 {
   int current_file_index = 0;
@@ -424,19 +550,19 @@ void ROSThread::OusterThread()
       //publish data
       if(to_string(data) + ".bin" == ouster_next_.first){
         //publish
-        ouster_next_.second.header.stamp.fromNSec(data);
+        ouster_next_.second.header.stamp = rclcpp::Time(data);
         ouster_next_.second.header.frame_id = "ouster";
         if(save_flag_ == true && process_flag_ == true){
           std::lock_guard<std::mutex> lock(bag_mutex_);
-          bag_.write("/ouster/points", ouster_next_.second.header.stamp, ouster_next_.second);
+          bag_.write(ouster_next_.second, "/ouster/points", rclcpp::Time(data));
         }
-        ouster_pub_.publish(ouster_next_.second);
+        ouster_pub_->publish(ouster_next_.second);
       }else{
 //        cout << "Re-load right ouster from path" << endl;
         //load current data
         pcl::PointCloud<pc_type_o> cloud;
         cloud.clear();
-        sensor_msgs::PointCloud2 publish_cloud;
+        sensor_msgs::msg::PointCloud2 publish_cloud;
         string current_file_name = data_folder_path_ + "/LiDAR/Ouster" +"/"+ to_string(data) + ".bin";
         if(find(next(ouster_file_list_.begin(),max(0,previous_file_index-search_bound_)),ouster_file_list_.end(),to_string(data)+".bin") != ouster_file_list_.end()){
             ifstream file;
@@ -456,9 +582,9 @@ void ROSThread::OusterThread()
             file.close();
 
             pcl::toROSMsg(cloud, publish_cloud);
-            publish_cloud.header.stamp.fromNSec(data);
+            publish_cloud.header.stamp = rclcpp::Time(data);
             publish_cloud.header.frame_id = "ouster";
-            ouster_pub_.publish(publish_cloud);
+            ouster_pub_->publish(publish_cloud);
         }
         previous_file_index = 0;
       }
@@ -466,7 +592,7 @@ void ROSThread::OusterThread()
       //load next data
       pcl::PointCloud<pc_type_o> cloud;
       cloud.clear();
-      sensor_msgs::PointCloud2 publish_cloud;
+      sensor_msgs::msg::PointCloud2 publish_cloud;
       current_file_index = find(next(ouster_file_list_.begin(),max(0,previous_file_index-search_bound_)),ouster_file_list_.end(),to_string(data)+".bin") - ouster_file_list_.begin();
       if(find(next(ouster_file_list_.begin(),max(0,previous_file_index-search_bound_)),ouster_file_list_.end(),ouster_file_list_[current_file_index+1]) != ouster_file_list_.end()){
           string next_file_name = data_folder_path_ + "/LiDAR/Ouster" +"/"+ ouster_file_list_[current_file_index+1];
@@ -495,8 +621,9 @@ void ROSThread::OusterThread()
     }
     if(ouster_thread_.active_ == false) return;
   }
-} //end ouster
+}
 
+// velodyne
 void ROSThread::VelodyneThread()
 {
   int current_file_index = 0;
@@ -514,20 +641,20 @@ void ROSThread::VelodyneThread()
       if(to_string(data) + ".bin" == velodyne_next_.first){
         //publish
 
-        velodyne_next_.second.header.stamp.fromNSec(data); 
+        velodyne_next_.second.header.stamp = rclcpp::Time(data); 
         velodyne_next_.second.header.frame_id = "velodyne";
         if(save_flag_ == true && process_flag_ == true){
           std::lock_guard<std::mutex> lock(bag_mutex_);
-          bag_.write("/velodyne/points", velodyne_next_.second.header.stamp, velodyne_next_.second);
+          bag_.write(velodyne_next_.second, "/velodyne/points", rclcpp::Time(data));
         }
-        velodyne_pub_.publish(velodyne_next_.second);
+        velodyne_pub_->publish(velodyne_next_.second);
 
       }else{
 //        cout << "Re-load right velodyne from path" << endl;
         //load current data
         pcl::PointCloud<pc_type> cloud;
         cloud.clear();
-        sensor_msgs::PointCloud2 publish_cloud;
+        sensor_msgs::msg::PointCloud2 publish_cloud;
         string current_file_name = data_folder_path_ + "/LiDAR/Velodyne" +"/"+ to_string(data) + ".bin";
 
         if(find(next(velodyne_file_list_.begin(),max(0,previous_file_index-search_bound_)),velodyne_file_list_.end(),to_string(data)+".bin") != velodyne_file_list_.end()){
@@ -547,9 +674,9 @@ void ROSThread::VelodyneThread()
             file.close();
 
             pcl::toROSMsg(cloud, publish_cloud);
-            publish_cloud.header.stamp.fromNSec(data);
+            publish_cloud.header.stamp = rclcpp::Time(data);
             publish_cloud.header.frame_id = "velodyne";
-            velodyne_pub_.publish(publish_cloud);
+            velodyne_pub_->publish(publish_cloud);
 
         }
         previous_file_index = 0;
@@ -558,7 +685,7 @@ void ROSThread::VelodyneThread()
       //load next data
       pcl::PointCloud<pc_type> cloud;
       cloud.clear();
-      sensor_msgs::PointCloud2 publish_cloud;
+      sensor_msgs::msg::PointCloud2 publish_cloud;
       current_file_index = find(next(velodyne_file_list_.begin(),max(0,previous_file_index-search_bound_)),velodyne_file_list_.end(),to_string(data)+".bin") - velodyne_file_list_.begin();
 
       if(find(next(velodyne_file_list_.begin(),max(0,previous_file_index-search_bound_)),velodyne_file_list_.end(),velodyne_file_list_[current_file_index+1]) != velodyne_file_list_.end()){
@@ -587,97 +714,6 @@ void ROSThread::VelodyneThread()
   }
 }
 
-void ROSThread::AevaThread()
-{
-  int current_file_index = 0;
-  int previous_file_index = 0;
-  while(1){
-    std::unique_lock<std::mutex> ul(aeva_thread_.mutex_);
-    aeva_thread_.cv_.wait(ul);
-    if(aeva_thread_.active_ == false) return;
-    ul.unlock();
-std::cout.precision(20);
-    while(!aeva_thread_.data_queue_.empty()){
-      auto data = aeva_thread_.pop();
-      //process
-      //publish data
-      if(to_string(data) + ".bin" == aeva_next_.first){
-        //publish
-        aeva_next_.second.header.stamp.fromNSec(data) ;
-        aeva_next_.second.header.frame_id = "aeva";
-        if(save_flag_ == true && process_flag_ == true){
-          std::lock_guard<std::mutex> lock(bag_mutex_);
-          bag_.write("/aeva/points", aeva_next_.second.header.stamp, aeva_next_.second);
-        }
-        aeva_pub_.publish(aeva_next_.second);
-
-      }else{
-        //load current data
-        pcl::PointCloud<pc_type_a> cloud;
-        cloud.clear();
-        sensor_msgs::PointCloud2 publish_cloud;
-        string current_file_name = data_folder_path_ + "/LiDAR/Aeva" +"/"+ to_string(data) + ".bin";
-        if(find(next(aeva_file_list_.begin(),max(0,previous_file_index-search_bound_)),aeva_file_list_.end(),to_string(data)+".bin") != aeva_file_list_.end()){
-            ifstream file;
-            file.open(current_file_name, ios::in|ios::binary);
-            while(!file.eof()){
-                pc_type_a point;
-                file.read(reinterpret_cast<char *>(&point.x), sizeof(float));
-                file.read(reinterpret_cast<char *>(&point.y), sizeof(float));
-                file.read(reinterpret_cast<char *>(&point.z), sizeof(float));
-                file.read(reinterpret_cast<char *>(&point.reflectivity), sizeof(float));
-                file.read(reinterpret_cast<char *>(&point.velocity), sizeof(float));
-                file.read(reinterpret_cast<char *>(&point.time_offset_ns), sizeof(int32_t));
-                file.read(reinterpret_cast<char *>(&point.line_index), sizeof(uint8_t));
-                if(data > 1691936557946849179)
-                    file.read(reinterpret_cast<char *>(&point.intensity), sizeof(float));
-                cloud.points.push_back (point);
-            }
-            file.close();
-
-            pcl::toROSMsg(cloud, publish_cloud);
-            publish_cloud.header.stamp.fromNSec(data); 
-            publish_cloud.header.frame_id = "aeva";          
-            aeva_pub_.publish(publish_cloud);
-
-        }
-        previous_file_index = 0;
-      }
-
-      //load next data
-      pcl::PointCloud<pc_type_a> cloud;
-      cloud.clear();
-      sensor_msgs::PointCloud2 publish_cloud;
-      current_file_index = find(next(aeva_file_list_.begin(),max(0,previous_file_index-search_bound_)),aeva_file_list_.end(),to_string(data)+".bin") - aeva_file_list_.begin();
-      if(find(next(aeva_file_list_.begin(),max(0,previous_file_index-search_bound_)),aeva_file_list_.end(),aeva_file_list_[current_file_index+1]) != aeva_file_list_.end()){
-          string next_file_name = data_folder_path_ + "/LiDAR/Aeva" +"/"+ aeva_file_list_[current_file_index+1];
-
-          ifstream file;
-          file.open(next_file_name, ios::in|ios::binary);
-          while(!file.eof()){
-              pc_type_a point;
-              file.read(reinterpret_cast<char *>(&point.x), sizeof(float));
-              file.read(reinterpret_cast<char *>(&point.y), sizeof(float));
-              file.read(reinterpret_cast<char *>(&point.z), sizeof(float));
-              file.read(reinterpret_cast<char *>(&point.reflectivity), sizeof(float));
-              file.read(reinterpret_cast<char *>(&point.velocity), sizeof(float));
-              file.read(reinterpret_cast<char *>(&point.time_offset_ns), sizeof(int32_t));
-              file.read(reinterpret_cast<char *>(&point.line_index), sizeof(uint8_t));
-              if(data > 1691936557946849179)
-                  file.read(reinterpret_cast<char *>(&point.intensity), sizeof(float));
-              cloud.points.push_back (point);
-          }
-          file.close();
-          pcl::toROSMsg(cloud, publish_cloud);
-          aeva_next_ = make_pair(aeva_file_list_[current_file_index+1], publish_cloud);
-      }
-
-      previous_file_index = current_file_index;
-    }
-    if(aeva_thread_.active_ == false) return;
-  }
-}
-
 void ROSThread::AviaThread()
 {
   int current_file_index = 0;
@@ -695,25 +731,25 @@ void ROSThread::AviaThread()
       //publish data
       if(to_string(data) + ".bin" == avia_next_.first){
         //publish
-        avia_next_.second.header.stamp.fromNSec(data);
+        avia_next_.second.header.stamp = rclcpp::Time(data);
         avia_next_.second.header.frame_id = "avia";
         if(save_flag_ == true && process_flag_ == true){
           std::lock_guard<std::mutex> lock(bag_mutex_);
-          bag_.write("/avia/points", avia_next_.second.header.stamp, avia_next_.second);
+          bag_.write(avia_next_.second, "/avia/points", rclcpp::Time(data));
         }
-        avia_pub_.publish(avia_next_.second);
+        avia_pub_->publish(avia_next_.second);
 
       }else{
 //        cout << "Re-load right avia from path" << endl;
         //load current data
-        livox_ros_driver::CustomMsg avia_msg;
+        livox_ros_driver2::msg::CustomMsg avia_msg;
         string current_file_name = data_folder_path_ + "/LiDAR/Avia" +"/"+ to_string(data) + ".bin";
         if(find(next(avia_file_list_.begin(),max(0,previous_file_index-search_bound_)),avia_file_list_.end(),to_string(data)+".bin") != avia_file_list_.end()){
             int i = 0;
             ifstream file;
             file.open(current_file_name, ios::in|ios::binary);
             while(!file.eof()){
-                livox_ros_driver::CustomPoint point;
+                livox_ros_driver2::msg::CustomPoint point;
                 file.read(reinterpret_cast<char *>(&point.x), sizeof(float));
                 file.read(reinterpret_cast<char *>(&point.y), sizeof(float));
                 file.read(reinterpret_cast<char *>(&point.z), sizeof(float));
@@ -727,16 +763,16 @@ void ROSThread::AviaThread()
             file.close();
 
             avia_msg.point_num = i;
-            avia_msg.header.stamp.fromNSec(data);
+            avia_msg.header.stamp = rclcpp::Time(data);
             avia_msg.header.frame_id = "livox_avia";
-            avia_pub_.publish(avia_msg);
+            avia_pub_->publish(avia_msg);
 
         }
         previous_file_index = 0;
       }
 
       //load next data
-      livox_ros_driver::CustomMsg avia_msg;
+      livox_ros_driver2::msg::CustomMsg avia_msg;
       current_file_index = find(next(avia_file_list_.begin(),max(0,previous_file_index-search_bound_)),avia_file_list_.end(),to_string(data)+".bin") - avia_file_list_.begin();
       if(find(next(avia_file_list_.begin(),max(0,previous_file_index-search_bound_)),avia_file_list_.end(),avia_file_list_[current_file_index+1]) != avia_file_list_.end()){
           string next_file_name = data_folder_path_ + "/LiDAR/Avia" +"/"+ avia_file_list_[current_file_index+1];
@@ -744,7 +780,7 @@ void ROSThread::AviaThread()
           file.open(next_file_name, ios::in|ios::binary);
           int i = 0;
           while(!file.eof()){
-              livox_ros_driver::CustomPoint point;
+              livox_ros_driver2::msg::CustomPoint point;
               file.read(reinterpret_cast<char *>(&point.x), sizeof(float));
               file.read(reinterpret_cast<char *>(&point.y), sizeof(float));
               file.read(reinterpret_cast<char *>(&point.z), sizeof(float));
@@ -757,7 +793,7 @@ void ROSThread::AviaThread()
           }
           file.close();
           avia_msg.point_num = i;
-          avia_msg.header.stamp.fromNSec(data);
+          avia_msg.header.stamp = rclcpp::Time(data);
           avia_msg.header.frame_id = "livox_avia";
           avia_next_ = make_pair(avia_file_list_[current_file_index+1], avia_msg);
       }
@@ -770,7 +806,6 @@ void ROSThread::AviaThread()
 
 int ROSThread::GetDirList(string dir, vector<string> &files)
 {
-
   vector<string> tmp_files;
   struct dirent **namelist;
   int n;
@@ -790,10 +825,11 @@ int ROSThread::GetDirList(string dir, vector<string> &files)
   for(auto iter = tmp_files.rbegin() ; iter!= tmp_files.rend() ; iter++){
     files.push_back(*iter);
   }
+  cout<< "Get file list from " << dir << " : " << files.size() << " files" << endl;
     return 0;
 }
 
-void ROSThread::FilePlayerStart(const std_msgs::BoolConstPtr& msg)
+void ROSThread::FilePlayerStart(const std_msgs::msg::Bool::SharedPtr msg)
 {
   if(auto_start_flag_ == true){
     cout << "File player auto start" << endl;
@@ -803,7 +839,7 @@ void ROSThread::FilePlayerStart(const std_msgs::BoolConstPtr& msg)
   }
 }
 
-void ROSThread::FilePlayerStop(const std_msgs::BoolConstPtr& msg)
+void ROSThread::FilePlayerStop(const std_msgs::msg::Bool::SharedPtr msg)
 {
   cout << "File player auto stop" << endl;
   play_flag_ = true;

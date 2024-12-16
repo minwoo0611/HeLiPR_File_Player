@@ -5,18 +5,21 @@
 #include <GL/glext.h>
 #include <GL/glu.h>
 //#include <GL/glut.h>
-#include <ros/ros.h>
+#include "rclcpp/rclcpp.hpp"
 #include <QProcess>
 
 int main(int argc, char *argv[])
 {
-  ros::init(argc, argv, "file_player");
-  ros::NodeHandle nh;
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("helipr_file_player");
 
-  QApplication a(argc, argv);
-  MainWindow w;
-  w.RosInit(nh);
-  w.show();
+    QApplication app(argc, argv);
 
-   return a.exec();
+    MainWindow window;
+    window.RosInit(node);
+    window.show();
+
+    // rclcpp::spin(node);
+    // rclcpp::shutdown();
+    return app.exec();
 }

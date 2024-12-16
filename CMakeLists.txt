@@ -1,132 +1,111 @@
-cmake_minimum_required(VERSION 2.8.3)
-project(file_player)
+cmake_minimum_required(VERSION 3.5)
+project(helipr_file_player)
 
-add_definitions(-std=c++14)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 
-if (NOT CMAKE_BUILD_TYPE)
-  set (CMAKE_BUILD_TYPE release)
-endif ()
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
-find_package(catkin REQUIRED cmake_modules
-  COMPONENTS
-  roscpp
-  rospy
-  std_msgs
-  geometry_msgs
-  message_generation
-  rosbag
-  image_transport
-  cv_bridge
-  dynamic_reconfigure
-  pcl_ros
-  pcl_conversions
-  pcl_msgs
-  camera_info_manager
-  tf
-  livox_ros_driver
-)
-set(CMAKE_AUTOMOC ON)
+# Set default build type to 'Release' if not specified
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 
-find_package(Eigen REQUIRED)
+# Find ament and other required packages
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
+find_package(image_transport REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(PCL REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
+find_package(tf2 REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(novatel_gps_msgs REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
 
-#set (CMAKE_PREFIX_PATH /opt/Qt5.6.1/5.6/gcc_64/lib/cmake)
-
-#find_package(Qt5Core)
-find_package(Qt5Widgets)
-find_package(Qt5Gui)
-find_package(Qt5OpenGL)
-
-
-add_message_files(
-  DIRECTORY msg
-)
-
-generate_messages(
-   DEPENDENCIES
-    std_msgs
-    geometry_msgs
-)
-
-generate_dynamic_reconfigure_options(
-  cfg/file_player.cfg
-  #...
-)
-
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES 
-    file_player
-  CATKIN_DEPENDS 
-    roscpp rospy 
-    std_msgs 
-    geometry_msgs 
-    message_runtime 
-    image_transport 
-    cv_bridge 
-    dynamic_reconfigure 
-    pcl_ros
-    pcl_conversions  
-    pcl_msgs
-    camera_info_manager
-    tf
-
-  DEPENDS 
-    Eigen
-)
-
-
-set (SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-set (File_Player_QTLib_src ${SRC_DIR}/mainwindow.cpp ${SRC_DIR}/ROSThread.cpp)
-set (File_Player_QTLib_hdr ${SRC_DIR}/mainwindow.h ${SRC_DIR}/ROSThread.h)
-set (File_Player_QTLib_ui  ${SRC_DIR}/mainwindow.ui)
-set (File_Player_QTBin_src ${SRC_DIR}/main.cpp)
-
-
-
-#find_package(GLEW REQUIRED)
-#find_package(GLUT REQUIRED)
-
-
+# Specify the include directories
 include_directories(
-  ${catkin_INCLUDE_DIRS}
-  ${file_player_INCLUDE_DIRS}
-  ${SRC_DIR}
-  ${Qt5Widgets_INCLUDE_DIRS}
-  ${PROJECT_BINARY_DIR}
   include
-  ${Eigen_INCLUDE_DIRS}
+  ${CMAKE_CURRENT_BINARY_DIR}
+  ${PCL_INCLUDE_DIRS}
+  ${Eigen3_INCLUDE_DIRS}
+  ${Qt5Widgets_INCLUDE_DIRS}
+  ${cv_bridge_INCLUDE_DIRS}
 )
 
+# Set source files
+set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-#qt5_wrap_cpp(File_Player_QTLib_hdr_moc ${File_Player_QTLib_hdr})
-qt5_wrap_ui (File_Player_QTLib_ui_moc  ${File_Player_QTLib_ui})
+set(FILE_PLAYER_QTLib_src ${SRC_DIR}/mainwindow.cpp ${SRC_DIR}/ROSThread.cpp)
+set(FILE_PLAYER_QTLib_hdr ${SRC_DIR}/mainwindow.h ${SRC_DIR}/ROSThread.h)
+set(FILE_PLAYER_QTLib_ui ${SRC_DIR}/mainwindow.ui)
+set(FILE_PLAYER_QTBin_src ${SRC_DIR}/main.cpp)
+
+qt5_wrap_ui(FILE_PLAYER_QTLib_ui_moc ${FILE_PLAYER_QTLib_ui})
+qt5_wrap_cpp(FILE_PLAYER_QTLib_hdr_moc ${FILE_PLAYER_QTLib_hdr})
 qt5_add_resources(SHADER_RSC_ADDED ${SRC_DIR}/resources.qrc)
 
+# Define executable
+add_executable(helipr_file_player ${FILE_PLAYER_QTLib_src} ${FILE_PLAYER_QTLib_hdr} ${FILE_PLAYER_QTBin_src} ${SHADER_RSC_ADDED} ${FILE_PLAYER_QTLib_ui_moc} ${FILE_PLAYER_QTLib_hdr_moc})
 
-
-###########
-## Build ##
-###########
-
-
-add_executable(file_player ${File_Player_QTLib_src} ${File_Player_QTLib_hdr} ${File_Player_QTBin_src} ${SHADER_RSC_ADDED} ${File_Player_QTLib_ui_moc})     
-
-add_dependencies(file_player file_player_msgs_generate_messages_cpp ${PROJECT_NAME}_gencfg)
-add_dependencies(file_player ${catkin_EXPORTED_TARGETS})
-
-target_link_libraries(file_player
-
-  ${catkin_LIBRARIES}
-  ${QT_LIBRARIES} 
-  ${OPENGL_LIBRARIES}
-  Qt5::Widgets 
-  Qt5::Gui 
-  Qt5::OpenGL
-  GL
-  ${BOOST_CUSTOM_LIBS}
-  ${Eigen_LIBRARIES}
+# Specify dependencies for the executable
+ament_target_dependencies(helipr_file_player
+  rclcpp
+  rclcpp_components
+  std_msgs
+  nav_msgs
+  sensor_msgs
+  geometry_msgs
+  image_transport
+  cv_bridge
+  PCL
+  pcl_conversions
+  tf2
+  Eigen3
+  std_srvs
+  rosbag2_cpp
+  rosgraph_msgs
+  novatel_gps_msgs
+  livox_ros_driver2
 )
 
+# Link libraries
+target_link_libraries(helipr_file_player
+  Qt5::Widgets
+  Qt5::Gui
+  Qt5::OpenGL
+  GL
+  ${rclcpp_LIBRARIES}
+  ${cv_bridge_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
 
+# Install the executable
+install(TARGETS helipr_file_player
+  DESTINATION lib/${PROJECT_NAME}
+)
 
+# Install message files (ROS 2)
+install(DIRECTORY msg/
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME} 
+)
+
+ament_package()
