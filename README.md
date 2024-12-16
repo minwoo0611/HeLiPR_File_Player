@@ -34,9 +34,11 @@ Learn about the long-term place recognition capabilities in conjunction with the
 
 **Maintainer**: Minwoo Jung (moonshot@snu.ac.kr)
 
-## Recent Updates (December 2023)
+## Recent Updates (December 2024)
 
 ---
+**2024/12/16**: Open the ROS2 branch for HeLiPR file player. If you use the Ubuntu 22.04 (ROS2), please check the branch.
+
 **2023/12/06**: Open another repository for Pointcloud processing, which name is [HeLiPR-Pointcloud-Toolbox](https://github.com/minwoo0611/HeLiPR-Pointcloud-Toolbox).
 
 **2023/12/05**: We post some images to help readers understand the HeLiPR dataset.
